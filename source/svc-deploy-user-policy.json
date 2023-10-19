@@ -1,0 +1,21 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowCloudformationDeploy",
+            "Effect": "Allow",
+            "Action": [
+                "cloudformation:*",
+                "iam:CreateRole",
+                "iam:GetRole",
+                "iam:AttachRolePolicy",
+                "iam:PassRole",
+                "secretsmanager:PutSecretValue",
+                "imagebuilder:StartImagePipelineExecution",
+                "s3:ListBucket",
+                "s3:PutObject"
+            ],
+            "Resource": "*"
+        }
+    ]
+}

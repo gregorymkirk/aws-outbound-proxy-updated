@@ -1,0 +1,285 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create Squid golden image for fedramp.
+
+Parameters:
+  AMI:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+    Description: AMI ID pointer in SSM. Default latest AMI Amazon Linux2.
+  Version:
+    Description: Pipeline document version
+    Default: 1.1.0
+    Type: String
+  SubnetId:
+    Description: VPC Subnet Id to use for Build/Test instance. Otherwise default vpc in account.
+    Default: ''
+    Type: String
+  SecurityGroupId:
+    Description: When using custom VPC, specify Security Group to use for Build/Test isntance.
+    Default: ''
+    Type: String
+
+Conditions:
+  UserVPC: !Not
+   - !Equals
+     - ''
+     - !Ref SubnetId
+
+Resources:
+  ImageBuilderLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+
+  ImageBuilderScriptsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      Comment: Role to be used by instance during image build.
+    Properties:
+      ManagedPolicyArns:
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/EC2InstanceProfileForImageBuilder
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action:
+              - sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+        Version: 2012-10-17
+
+  InstanceRoleS3Policy:
+    Type: AWS::IAM::Policy
+    Metadata:
+      Comment: Allows the instance to save log files and get scripts to/from s3.
+    Properties:
+      PolicyName: ImageBuilderLogBucketPolicy
+      Roles:
+        - Ref: InstanceRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - s3:PutObject
+            Effect: Allow
+            Resource:
+              - !Sub
+                - arn:${AWS::Partition}:s3:::${BUCKET}/*
+                - BUCKET: !Ref ImageBuilderLogBucket
+          - Action:
+              - s3:GetObject
+            Effect: Allow
+            Resource:
+              - !Sub
+                - arn:${AWS::Partition}:s3:::${BUCKET}/*
+                - BUCKET: !Ref ImageBuilderScriptsBucket
+          - Action:
+              - s3:ListBucket
+            Effect: Allow
+            Resource:
+              - !Sub
+                - arn:${AWS::Partition}:s3:::${BUCKET}
+                - BUCKET: !Ref ImageBuilderScriptsBucket
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: 
+        - !Ref InstanceRole
+
+  ImageInfraConfiguration:
+    Type: AWS::ImageBuilder::InfrastructureConfiguration
+    Properties:
+      Name: squid-golden-infra-config
+      InstanceProfileName:
+        Ref: InstanceProfile
+      Logging:
+        S3Logs:
+          S3BucketName:
+            Ref: ImageBuilderLogBucket
+      TerminateInstanceOnFailure: true
+      SubnetId: !If
+         - UserVPC
+         - !Ref SubnetId
+         - !Ref "AWS::NoValue"
+      SecurityGroupIds: !If
+         - UserVPC
+         - [!Ref SecurityGroupId]
+         - !Ref "AWS::NoValue"
+
+  FIPSComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: squid-enable-fips
+      Version: !Ref Version
+      Description: Run FIPS enable script
+      Platform: Linux
+      Data: !Sub 
+            - | 
+              name: squid-enable-fips
+              description: Get FIPS script and run
+              schemaVersion: 1.0
+              phases:
+                - name: build
+                  steps:
+                    - name: DownloadScripts
+                      action: S3Download
+                      inputs:
+                        - source: 's3://${BUCKET}/pk_awslinux2_enable_fips.sh'
+                          destination: '/tmp/pk_awslinux2_enable_fips.sh'
+                    - name: Chmod
+                      action: ExecuteBash
+                      onFailure: Abort
+                      inputs:
+                        commands:
+                          - 'chmod +x {{ build.DownloadScripts.inputs[0].destination }}'
+                    - name: Run
+                      action: ExecuteBash
+                      onFailure: Abort
+                      inputs:
+                        commands:
+                          - 'sudo {{ build.DownloadScripts.inputs[0].destination }}'
+            - BUCKET: !Ref ImageBuilderScriptsBucket
+
+  SshdComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: sshd-config
+      Version: !Ref Version
+      Description: replaces sshd and downloads jq
+      Platform: Linux
+      Data: !Sub
+            - | 
+              name: sshd_config file
+              description: Replaces the sshd_config file
+              schemaVersion: 1.0
+              phases:
+                - name: build
+                  steps:
+                    - name: DownloadsshdConfig
+                      action: S3Download
+                      inputs:
+                        - source: 's3://${BUCKET}/sshd_config'
+                          destination: '/tmp/sshd_config'
+                    - name: Restart-sshdConfig
+                      action: ExecuteBash
+                      onFailure: Abort
+                      inputs:
+                        commands:
+                          - 'sudo mv /tmp/sshd_config /etc/ssh/sshd_config'
+                          - 'sudo systemctl restart sshd'
+            - BUCKET: !Ref ImageBuilderScriptsBucket
+
+  SquidComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: squid-3-5-20-install
+      Version: !Ref Version
+      Description: Install Squid 3.5.20
+      Platform: Linux
+      Data: | 
+        name: squid-install
+        description: Install Squid 3.5.20
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: squid-install
+                action: ExecuteBash
+                onFailure: Abort
+                inputs:
+                  commands:
+                    - 'sudo yum install -y squid-3.5.20-17.amzn2.4.1'
+                    - 'sudo systemctl enable squid'
+
+  SysComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: system-settings
+      Version: !Ref Version
+      Description: system settings
+      Platform: Linux
+      Data: | 
+        name: system-settings
+        description: system settings
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: sysctl
+                action: ExecuteBash
+                onFailure: Abort
+                inputs:
+                  commands:
+                    - 'sudo echo "net.ipv4.ip_local_port_range=15000 60999" >> /etc/sysctl.conf'
+                    - 'sudo echo "net.ipv4.tcp_fin_timeout=30" >> /etc/sysctl.conf'
+
+  UpdateOSComponent:
+    Type: AWS::ImageBuilder::Component
+    Properties:
+      Name: update-os-squid
+      Version: !Ref Version
+      Description: Update OS
+      Platform: Linux
+      Data: |
+        name: update-os-squid
+        description: Update OS
+        schemaVersion: 1.0
+        phases:
+          - name: build
+            steps:
+              - name: update-linux
+                action: UpdateOS
+                onFailure: Abort
+                maxAttempts: 2
+
+  SquidGoldenImageRecipe:
+    Type: AWS::ImageBuilder::ImageRecipe
+    Properties:
+      Name: squid-3-5-20-golden-fips
+      Version: !Ref Version
+      ParentImage: !Ref AMI
+      Components:
+        - ComponentArn: !Ref UpdateOSComponent
+        - ComponentArn: !Sub arn:${AWS::Partition}:imagebuilder:${AWS::Region}:aws:component/reboot-linux/1.0.1/1
+        - ComponentArn: !Ref SquidComponent
+        - ComponentArn: !Ref SysComponent
+        - ComponentArn: !Ref FIPSComponent
+        - ComponentArn: !Ref SshdComponent
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            DeleteOnTermination: true
+            Encrypted: true
+
+  ImagePipeline:
+    Type: AWS::ImageBuilder::ImagePipeline
+    Properties:
+      Name: squid-golden-pipeline
+      Description: squid golden pipeline
+      ImageRecipeArn: !Ref SquidGoldenImageRecipe
+      InfrastructureConfigurationArn: !Ref ImageInfraConfiguration
+      Schedule:
+        PipelineExecutionStartCondition: EXPRESSION_MATCH_ONLY
+        ScheduleExpression: cron(0 16 ? * 3 *)
+      Status: ENABLED
+
+Outputs:
+  ScriptsBucket:
+    Description: Upload CIS Benchmark and other scripts to this S3 bucket.
+    Value: !Ref ImageBuilderScriptsBucket
+    Export:
+      Name: SquidImageScriptsBucket

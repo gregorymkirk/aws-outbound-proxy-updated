@@ -1,0 +1,1047 @@
+# Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+
+Description: Outbound filtering proxy
+
+Parameters:
+  PipelineLogGroup:
+    Type: String
+    Description: Name of Cloudwartch Logs log group used by Squid AMI pipeline. 
+    Default: squid-3-5-20-golden-fips
+
+  AllowDomains:
+    Type: String
+    Default: .amazonaws.com, .debian.org
+    Description: allowed domains comma separated
+  
+  CustomDNS:
+    Type: String
+    Default: default
+    Description: Provide optional a DNS server for domain filtering, like OpenDNS (comma separated, like 8.8.8.8,8.8.8.7)
+  
+  Environment:
+    Type: String
+    Default: preprod
+    AllowedValues: [govcan, preprod, prod, dodgovprod]
+    ConstraintDescription: must specify govcan, preprod, dodgovprod or prodprod.
+    Description: Environment name
+
+  KeyName:
+    Type: String
+    Description: Name of RSA key for EC2 access for testing only.
+    Default: ''
+
+  ProxyPort:
+    Type: String
+    Default: 3128
+    Description: Port Proxy 
+  
+  VpcId: 
+    Description: VPC ID Where the Proxy will be installed
+    Type: AWS::EC2::VPC::Id
+
+  PrivateSubnetIDs:
+    Description: Private SubnetIDs where the Network LoadBalancer will be placed (Select min 2 max 3)
+    Type: "List<AWS::EC2::Subnet::Id>"
+  
+  PublicSubnetIDs:
+    Description: Public SubnetIDs where the proxy will be placed (Select min 2 max 3)
+    Type: "List<AWS::EC2::Subnet::Id>"
+  
+  InstanceType:
+    Description: WebServer EC2 instance type
+    Type: String
+    Default: t3.medium
+    AllowedValues:
+    - t3.nano
+    - t3.micro
+    - t3.small
+    - t3.medium
+    - t3.large
+    - m5a.large
+    - m5a.xlarge
+    - m5a.2xlarge
+    ConstraintDescription: must be a valid EC2 instance type.
+
+  NetworkAllowedCIDR:
+    Description: CIDR allowed in Proxy Security Group. The allowed block size is between a /32 netmask and /8 netmask
+    Type: String
+    Default: 10.0.0.0/8
+    AllowedPattern: ^[.0-9]*\/([89]|[12][0-9]|3[0-2])$
+
+  LatestAmiId:
+    Type: String
+    Description: golden Amazon Machine Image id
+
+  RsyslogTarget:
+    Type: String
+    Default: localhost
+    Description: Rsyslog target hostip, needed for squid logs.
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+    - Label:
+        default: Proxy parameter
+      Parameters:
+      - Environment
+      - AllowDomains
+      - CustomDNS  
+      - ProxyPort
+      - InstanceType
+      - LatestAmiId
+      - KeyName
+
+    - Label:
+        default: Network parameter
+      Parameters:
+      - VpcId
+      - PublicSubnetIDs
+      - PrivateSubnetIDs
+      - NetworkAllowedCIDR
+      - RsyslogTarget
+
+    ParameterLabels:
+      AllowDomains:
+        default: Allowed domains
+      CustomDNS:
+        default: Custom DNS servers
+      ProxyPort:
+        default: Proxy Port
+      InstanceType:
+        default: Instance Type
+      LatestAmiId:
+        default: AMI ID  
+      KeyName: 
+        default: SSH Key name
+      VpcId:
+        default: VPC ID
+      PrivateSubnetIDs:
+        default: Private Subnet IDs
+      PublicSubnetIDs:
+        default: Public Subnet IDs
+      NetworkAllowedCIDR:
+        default: Allowed client CIDR
+      RsyslogTarget:
+        default: RSyslog target host
+
+
+Conditions:
+
+  AddSSHKey: !Not
+   - !Equals
+     - ''
+     - !Ref KeyName
+
+  EnvProd: !Equals
+    - !Ref 'Environment'
+    - prod
+
+  EnvPreProd: !Equals
+    - !Ref 'Environment'
+    - preprod
+
+  EnvGovcan: !Equals
+    - !Ref 'Environment'
+    - govcan
+  
+  EnvDoD: !Equals
+    - !Ref 'Environment'
+    - dodgovprod
+
+Mappings:
+  Certs:
+    preprod:
+      "CA": |
+          -----BEGIN CERTIFICATE-----
+          MIID2DCCAsACCQDSjYYkI4o19jANBgkqhkiG9w0BAQsFADCBrTELMAkGA1UEBhMC
+          VVMxCzAJBgNVBAgMAlRYMQ4wDAYDVQQHDAVQbGFubzEPMA0GA1UECgwGTWNBZmVl
+          MSswKQYDVQQLDCJFbnRlcnByaXNlIFNlY3VyaXR5IE1hbmFnZXIgRGV2aWNlMRkw
+          FwYDVQQDDBBlcmMubWNhZmVlLmxvY2FsMSgwJgYJKoZIhvcNAQkBFhlzdXBwb3J0
+          QG5pdHJvc2VjdXJpdHkuY29tMB4XDTIwMDUwMTIxMjUxNVoXDTMwMDUwMTIxMjUx
+          NVowga0xCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJUWDEOMAwGA1UEBwwFUGxhbm8x
+          DzANBgNVBAoMBk1jQWZlZTErMCkGA1UECwwiRW50ZXJwcmlzZSBTZWN1cml0eSBN
+          YW5hZ2VyIERldmljZTEZMBcGA1UEAwwQZXJjLm1jYWZlZS5sb2NhbDEoMCYGCSqG
+          SIb3DQEJARYZc3VwcG9ydEBuaXRyb3NlY3VyaXR5LmNvbTCCASIwDQYJKoZIhvcN
+          AQEBBQADggEPADCCAQoCggEBAMozHoir1FqfR5NT5swnKzIo+jqN9SC1R3JcMOAX
+          lNhglgdlljXOB6qcK0dzhLY5taM78zeUStuflhqud7cRWyNEkXnvTwGSDpgiJ0GF
+          yK4vtgIMdexh+ObUZ9m78UMBcLRiHj8EiSVSAijL8Ao9QlzP7kG1LBZr8Swh5T+V
+          13IfNcV0BINPMflLQb2QLT2vha6dqqbxts6bPlmkIBc2FZnDa0LIFlmK3b2+J1mP
+          osUdHtXcAcRAPXjkCehzaPSMAX4BWf0W2cbF2nxNNylmKPU0md1jxOFJHsWkXSdw
+          3EtEXF8m2NLEfl5ke5wiSqDhEjGrcZDq0chzsxPhWiKHaWECAwEAATANBgkqhkiG
+          9w0BAQsFAAOCAQEAZq1H2yh1doY3zuTKhs7icEyLSz4UWVQFFYUDkJ/sG6JmwW4M
+          QmKf9EP1UMy1j82aeD37saZobfokzSSbNjnS//azWHCw6l4SoYUgITXEUd4w2aVv
+          kQyQHHsaakIbi03gnXGTBTR963j2MswpbRicHdDQgKqQsPDeYAg8RLxTHXUsCdsg
+          bEaSy1h6i3VGSSIm3UzzLMRZsb0iPfKypzRA6+siRHRjSEg3/Xeys5KmnifMrUFX
+          O9ja1+fyZqrUnzh0U5gZuq3QbwN1Cg19Ur9hHACgasquTZwH+0nt0wIgGlf1hNjS
+          Ag60PIVHGvvAuAZv31Lb7ieRxou5p+e1AF0RLQ==
+          -----END CERTIFICATE-----
+    prod:
+      "CA": |
+          -----BEGIN CERTIFICATE-----
+          MIID2DCCAsACCQDTZpI8wRtHizANBgkqhkiG9w0BAQsFADCBrTELMAkGA1UEBhMC
+          VVMxCzAJBgNVBAgMAlRYMQ4wDAYDVQQHDAVQbGFubzEPMA0GA1UECgwGTWNBZmVl
+          MSswKQYDVQQLDCJFbnRlcnByaXNlIFNlY3VyaXR5IE1hbmFnZXIgRGV2aWNlMRkw
+          FwYDVQQDDBBlcmMubWNhZmVlLmxvY2FsMSgwJgYJKoZIhvcNAQkBFhlzdXBwb3J0
+          QG5pdHJvc2VjdXJpdHkuY29tMB4XDTE5MDgwNzE5MDU1MloXDTI5MDgwNjE5MDU1
+          Mlowga0xCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJUWDEOMAwGA1UEBwwFUGxhbm8x
+          DzANBgNVBAoMBk1jQWZlZTErMCkGA1UECwwiRW50ZXJwcmlzZSBTZWN1cml0eSBN
+          YW5hZ2VyIERldmljZTEZMBcGA1UEAwwQZXJjLm1jYWZlZS5sb2NhbDEoMCYGCSqG
+          SIb3DQEJARYZc3VwcG9ydEBuaXRyb3NlY3VyaXR5LmNvbTCCASIwDQYJKoZIhvcN
+          AQEBBQADggEPADCCAQoCggEBALuB+QdbGaLTbvPp/tMTez4ggm2UYT4cIHrp6hNG
+          aCaq98p3pgp/pDSO4zJ+GoJ7ZODqUtmBTobfNFdogHhjuz7JWHmKHKRxMJ2rBE8t
+          70MAn9WLSdJQv+7qNZ+Ty2pch+S+L4mjjUN0oVSwqCe6HVRhKcShP3mD0PumUPD8
+          O4DCcfaHzKCcry8ZOiFVQDK8PvcTmgL9+OE4z5i2p0EM8o3xqnKiMm1u0ufqtfd/
+          0yYiykqBocSQL11O+iBE3s38byNn+IbciNRn0ex8FFinOIdHx/zFMEeaScaQn9jp
+          rMshTvETgh03tBvGuzQsWg8vuCpZOoM0nfBkVliAdlEB/U8CAwEAATANBgkqhkiG
+          9w0BAQsFAAOCAQEAGCR9AjyPR4pI928zO4olvLo8mEOJsCAbR/EgKGskiUD4cpzy
+          FNlpSUftGWHSTHSllTlgSZ4sT5oa13mymvMDkFLxVX4NsPqjqnywzR/CfZwAzlUa
+          LPdEQJTxetEHGsurLf3zSOo03rUdEy6qSyjeaDyal3kI8O2d40BwxQSM+jXNQf2g
+          e7lUUXPNR2lId0cf6y8V8Od32f4M44YaGFFEyiKW7lqDyklKmOxh8NGcOvN7d1TQ
+          jBJXXqANVkOjmaQzmeSnCVcXPCn8KpJuR1tzX77Zzal+/HI2vlE75tkujuT4P8XG
+          9p+79ur1vHtKjIsjYZLR7QjTp2KMbG5F/HzETw==
+          -----END CERTIFICATE-----
+    govcan:
+      "CA": |
+          -----BEGIN CERTIFICATE-----
+          MIID2DCCAsACCQDSjYYkI4o19jANBgkqhkiG9w0BAQsFADCBrTELMAkGA1UEBhMC
+          VVMxCzAJBgNVBAgMAlRYMQ4wDAYDVQQHDAVQbGFubzEPMA0GA1UECgwGTWNBZmVl
+          MSswKQYDVQQLDCJFbnRlcnByaXNlIFNlY3VyaXR5IE1hbmFnZXIgRGV2aWNlMRkw
+          FwYDVQQDDBBlcmMubWNhZmVlLmxvY2FsMSgwJgYJKoZIhvcNAQkBFhlzdXBwb3J0
+          QG5pdHJvc2VjdXJpdHkuY29tMB4XDTIwMDUwMTIxMjUxNVoXDTMwMDUwMTIxMjUx
+          NVowga0xCzAJBgNVBAYTAlVTMQswCQYDVQQIDAJUWDEOMAwGA1UEBwwFUGxhbm8x
+          DzANBgNVBAoMBk1jQWZlZTErMCkGA1UECwwiRW50ZXJwcmlzZSBTZWN1cml0eSBN
+          YW5hZ2VyIERldmljZTEZMBcGA1UEAwwQZXJjLm1jYWZlZS5sb2NhbDEoMCYGCSqG
+          SIb3DQEJARYZc3VwcG9ydEBuaXRyb3NlY3VyaXR5LmNvbTCCASIwDQYJKoZIhvcN
+          AQEBBQADggEPADCCAQoCggEBAMozHoir1FqfR5NT5swnKzIo+jqN9SC1R3JcMOAX
+          lNhglgdlljXOB6qcK0dzhLY5taM78zeUStuflhqud7cRWyNEkXnvTwGSDpgiJ0GF
+          yK4vtgIMdexh+ObUZ9m78UMBcLRiHj8EiSVSAijL8Ao9QlzP7kG1LBZr8Swh5T+V
+          13IfNcV0BINPMflLQb2QLT2vha6dqqbxts6bPlmkIBc2FZnDa0LIFlmK3b2+J1mP
+          osUdHtXcAcRAPXjkCehzaPSMAX4BWf0W2cbF2nxNNylmKPU0md1jxOFJHsWkXSdw
+          3EtEXF8m2NLEfl5ke5wiSqDhEjGrcZDq0chzsxPhWiKHaWECAwEAATANBgkqhkiG
+          9w0BAQsFAAOCAQEAZq1H2yh1doY3zuTKhs7icEyLSz4UWVQFFYUDkJ/sG6JmwW4M
+          QmKf9EP1UMy1j82aeD37saZobfokzSSbNjnS//azWHCw6l4SoYUgITXEUd4w2aVv
+          kQyQHHsaakIbi03gnXGTBTR963j2MswpbRicHdDQgKqQsPDeYAg8RLxTHXUsCdsg
+          bEaSy1h6i3VGSSIm3UzzLMRZsb0iPfKypzRA6+siRHRjSEg3/Xeys5KmnifMrUFX
+          O9ja1+fyZqrUnzh0U5gZuq3QbwN1Cg19Ur9hHACgasquTZwH+0nt0wIgGlf1hNjS
+          Ag60PIVHGvvAuAZv31Lb7ieRxou5p+e1AF0RLQ==
+          -----END CERTIFICATE-----
+    dodgovprod:
+      "CA" : |
+        -----BEGIN CERTIFICATE-----
+        MIIFYjCCBEqgAwIBAgITTQAAABTaAcHTMregDgAAAAAAFDANBgkqhkiG9w0BAQsF
+        ADBKMRUwEwYKCZImiZPyLGQBGRYFbG9jYWwxFzAVBgoJkiaJk/IsZAEZFgdkb2Qt
+        Z292MRgwFgYDVQQDEw9ET0QtR09WLVBST0QtQ0EwHhcNMjIwOTEwMTMzODI0WhcN
+        MjQwOTA5MTMzODI0WjAhMR8wHQYDVQQDExZyZWNlaXZlci5kb2QtZ292LmxvY2Fs
+        MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyDYel4Fx9vj59uTdaeBM
+        6FZgbjnJBkMJ5L1Wzzjag6pVe5b6Rzxj+omTKRakJOVPxLe/ILRtIPzjyhHlVCUv
+        a0Ro7s+hS3zbcjT6DmZEUx6E1x2FBiumnpiNi8XvWuB1FJGdL9hnJ+IjiNTa3A+2
+        nb9s+iH1Q4FYcgTeSFRhupKF6w4bbhY890hb0r9Gvuvb7+0BjoMDGo5WOSagDuuZ
+        1tmH9GJzej/Xwfgwh87j7kdDIZlQTaTOvGmz/bkm3AZ7RXj9pIYg0Gwoeb/+ISmj
+        WVllUd0kIbLtZHy0hs8PV72wItrDEUF8OmskBAg2vRqNWivIc+IeZhSe2z6PQfrY
+        TwIDAQABo4ICaDCCAmQwIQYJKwYBBAGCNxQCBBQeEgBXAGUAYgBTAGUAcgB2AGUA
+        cjATBgNVHSUEDDAKBggrBgEFBQcDATAOBgNVHQ8BAf8EBAMCBaAwRAYJKoZIhvcN
+        AQkPBDcwNTAOBggqhkiG9w0DAgICAIAwDgYIKoZIhvcNAwQCAgCAMAcGBSsOAwIH
+        MAoGCCqGSIb3DQMHMB0GA1UdDgQWBBTvSDiJL11Lri/GPHCNDiYRaU1WMzAfBgNV
+        HSMEGDAWgBS7KkiBeoJucpmPkEuudPYO1GjXkzCBzQYDVR0fBIHFMIHCMIG/oIG8
+        oIG5hoG2bGRhcDovLy9DTj1ET0QtR09WLVBST0QtQ0EsQ049Y2EtcDEsQ049Q0RQ
+        LENOPVB1YmxpYyUyMEtleSUyMFNlcnZpY2VzLENOPVNlcnZpY2VzLENOPUNvbmZp
+        Z3VyYXRpb24sREM9ZG9kLWdvdixEQz1sb2NhbD9jZXJ0aWZpY2F0ZVJldm9jYXRp
+        b25MaXN0P2Jhc2U/b2JqZWN0Q2xhc3M9Y1JMRGlzdHJpYnV0aW9uUG9pbnQwgcMG
+        CCsGAQUFBwEBBIG2MIGzMIGwBggrBgEFBQcwAoaBo2xkYXA6Ly8vQ049RE9ELUdP
+        Vi1QUk9ELUNBLENOPUFJQSxDTj1QdWJsaWMlMjBLZXklMjBTZXJ2aWNlcyxDTj1T
+        ZXJ2aWNlcyxDTj1Db25maWd1cmF0aW9uLERDPWRvZC1nb3YsREM9bG9jYWw/Y0FD
+        ZXJ0aWZpY2F0ZT9iYXNlP29iamVjdENsYXNzPWNlcnRpZmljYXRpb25BdXRob3Jp
+        dHkwDQYJKoZIhvcNAQELBQADggEBABX5QQ3wFRT37bqtGlY/eUHf6gB91Ct8/9Wy
+        F/R0lrHG6V/EziSEYigRwDRkrYBqklbCVfZAy3kshX+Pb1gzrht4/hneYDrF/qoi
+        U8BrW50vR+mx5+8SSawF42/l2jrdHwHBpQ0H9sUs4AFfrJjdeiunx93s2AmmDDO2
+        2tQ62+PYBxVDgxoi7PE3TAL4xV93cobhRlm0A/cQGlkwahilcQfgR+KNDMjp2hOd
+        3zIELPkfYqQ6CgSXwpYgsp+2w3dBxrfAcbElHrETW8VfskL7BAlTdF7k7+ZrDLJY
+        iCcSc39Ozus6f0V2rLkhf+RXfZ+TLhFFXHrX6BWxm6ybVCVE7mY=
+        -----END CERTIFICATE-----
+
+  AgentBuckets:
+    preprod:
+      "AgentBucket": "mc-preprod-us-gov-west-1-agents"
+    prod:
+      "AgentBucket": "mc-us-gov-west-1-agents"
+    govcan:
+      "AgentBucket": "mc-ca-central-1-agents"
+    dodgovprod:
+      "AgentBucket": "dod-gov-prod-agents"
+      
+Resources:
+  OutboundProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: AssociateEIP
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:AssociateAddress
+            - ec2:Describe*
+            - ec2:CreateTags
+            Resource:
+            - "*"
+      - PolicyName: RevokeAuthorizeSG
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ec2:RevokeSecurityGroupIngress
+            - ec2:AuthorizeSecurityGroupIngress
+            - ec2:Describe*
+            Resource:
+            - "*"
+      - PolicyName: GetSecret
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - secretsmanager:GetSecretValue
+            Resource:
+            - !Ref AllowedDomainsSecret
+      - PolicyName: GetParameter
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - ssm:GetParameter
+            - ssm:GetParameters
+            Resource:
+            - "*"
+      - PolicyName: S3Read
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:List*
+            - s3:Get*
+            Resource:
+            - "*"
+
+  FixedEIP0:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: squid-proxy-eip0
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid 
+  
+  FixedEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: squid-proxy-eip1
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid
+
+  FixedEIP2:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: squid-proxy-eip2
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid
+
+  FixedEIP3:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: squid-proxy-eip3
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid
+
+  AllowedDomainsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: squid-proxy-allow-domain-list
+      Description: This secret contains the squid proxy allow list
+      SecretString: !Ref AllowDomains
+      Tags:
+        - Key: Name
+          Value: squid-proxy-domain-allow-list
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid
+
+  VPCEndpointService:
+    Type: AWS::EC2::VPCEndpointService
+    Properties: 
+      AcceptanceRequired: True
+      NetworkLoadBalancerArns: 
+        - !Ref LoadBalancer
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: network
+      Name: squid-proxy-nlb
+      LoadBalancerAttributes:
+        - Key: deletion_protection.enabled
+          Value:  True
+        - Key: load_balancing.cross_zone.enabled
+          Value: True
+      Subnets: !Ref PrivateSubnetIDs
+      Tags:
+        - Key: Name
+          Value: squid-proxy-nlb
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid
+
+  NetworkLoadBalancerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: squid-proxy-target-group
+      Port: !Ref ProxyPort
+      Protocol: TCP
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 90
+        - Key: deregistration_delay.connection_termination.enabled
+          Value: True
+      Tags:
+        - Key: Name
+          Value: squid-proxy-target-group
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Service
+          Value: tooling
+        - Key: Product
+          Value: Squid 
+
+  LoadBalancerListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref NetworkLoadBalancerTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref ProxyPort
+      Protocol: TCP
+
+  OutboundProxyProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      InstanceProfileName: !Sub "Proxy-EC2-${AWS::StackName}"
+      Roles: 
+        - !Ref OutboundProxyRole
+
+  OutboundProxySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow access to squid proxy
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+      - CidrIp: !Ref NetworkAllowedCIDR
+        FromPort: !Ref ProxyPort
+        ToPort: !Ref ProxyPort
+        IpProtocol: tcp
+
+  OutboundProxyASG:
+    #Using a LaunchTemplate (new)
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier: !Ref PublicSubnetIDs
+      Cooldown: 1800
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      LaunchTemplate: 
+        LaunchTemplateId: !Ref OutboundProxyLaunchTemplate
+        Version: !GetAtt OutboundProxyLaunchTemplate.LatestVersionNumber
+      MaxSize: 3
+      MinSize: !If [EnvPreProd, 1, 2]
+      DesiredCapacity: !If [EnvPreProd, 1, 2]
+      TargetGroupARNs:
+        - Ref: "NetworkLoadBalancerTargetGroup"
+      TerminationPolicies:
+      - OldestInstance
+      Tags:
+      - Key: Name
+        PropagateAtLaunch: 'true'
+        Value: squid-proxy
+      - Key: CostCenter
+        PropagateAtLaunch: 'true'
+        Value: SysOps
+      - Key: Environment
+        PropagateAtLaunch: 'true'
+        Value: !Ref Environment
+      - Key: OSFamily
+        PropagateAtLaunch: 'true'
+        Value: AWSLinux2
+      - Key: Service
+        PropagateAtLaunch: 'true'
+        Value: tooling
+      - Key: Product
+        PropagateAtLaunch: 'true'
+        Value: Squid
+      - Key: CIS
+        PropagateAtLaunch: 'true'
+        Value: Full
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: '1'
+    UpdatePolicy:
+      AutoScalingScheduledAction:
+        IgnoreUnmodifiedGroupSizeProperties: true
+      AutoScalingRollingUpdate:
+        MinInstancesInService: !If [EnvPreProd, 1, 2]
+        MaxBatchSize: 1
+        PauseTime: PT5M
+        WaitOnResourceSignals: 'true'
+        SuspendProcesses:
+        - ScheduledActions
+
+  OutboundProxyLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: OutboundProxyLaunchTemplate
+      LaunchTemplateData:
+        IamInstanceProfile:
+          Arn: !GetAtt
+            - OutboundProxyProfile
+            - Arn
+        DisableApiTermination: false
+        ImageId: !Ref  LatestAmiId
+        InstanceType: !Ref InstanceType
+        KeyName: !If 
+         - AddSSHKey
+         - !Ref KeyName
+         - !Ref "AWS::NoValue" 
+        SecurityGroupIds:
+            - !Ref OutboundProxySecurityGroup
+        UserData:
+          Fn::Base64: !Sub 
+            - |
+              #!/bin/bash -xe
+              # Get the latest CloudFormation package
+              easy_install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-latest.tar.gz
+              # Start cfn-init
+              /opt/aws/bin/cfn-init -s ${AWS::StackId} -r OutboundProxyLaunchTemplate --region ${AWS::Region} || error_exit 'Failed to run cfn-init'
+              # Start up the cfn-hup daemon to listen for changes to the launch configuration metadata
+              /opt/aws/bin/cfn-hup || error_exit 'Failed to start cfn-hup'
+              # get the IP allocation id 
+              EIPs=(${EIP0} ${EIP1} ${EIP2} ${EIP3})
+              for i in ${!EIPs[@]}; do
+                out=$(aws ec2  describe-addresses --region ${AWS::Region} --allocation-ids $i) 
+                if [[ $out != *AssociationId* ]]; then 
+                      freeEIP=$i
+                      break
+                fi
+              done
+              # bind the address 
+              echo "binding EIP"
+              aws ec2 associate-address --region ${AWS::Region} --instance-id $(curl -s http://169.254.169.254/latest/meta-data/instance-id) --allocation-id $freeEIP --allow-reassociation || error_exit 'Failed to Associate Elastic IP'
+              # generate self-signed dummy certificate
+              openssl req -x509 -newkey rsa:4096 -keyout /etc/squid/cert.pem -out /etc/squid/cert.pem -days 365 -subj "/C=US/ST=CA/L=Santa Clara/O=McAfee/OU=CCS/CN=Squid-Proxy" -nodes
+              #  get the allowed domain list
+              /root/fetch-config-cron.sh
+              #  start squid
+              systemctl restart rsyslog
+              systemctl restart squid
+              # cron to update squid configuration every 30 mins
+              echo "*/30 * * * * /root/fetch-config-cron.sh" | crontab -
+              # set up DNS if needed 
+              if [[ ${CustomDNS} != "default" ]]; then
+                  /root/update-dns.sh
+              fi
+
+              # Bounce rsyslogd to grab the new hostname - EL7/AL2 Distros
+              systemctl restart rsyslog        
+              # All done so signal success
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource OutboundProxyASG --region ${AWS::Region}
+
+              aws s3 cp s3://${AGENTBUCKET}/SIEM/configure-siem.sh /tmp/configure-siem.sh --region ${AWS::Region}
+              chmod +x /tmp/configure-siem.sh
+              /tmp/configure-siem.sh
+
+              aws s3 cp s3://${AGENTBUCKET}/tenable/InstallTenable.sh /tmp/InstallTenable.sh --region ${AWS::Region}
+              chmod +x /tmp/InstallTenable.sh
+              /tmp/InstallTenable.sh Management
+
+              aws s3 cp s3://${AGENTBUCKET}/epo/TrellixAgentInstall.sh /tmp/TrellixAgentInstall.sh --region ${AWS::Region}
+              chmod +x /tmp/TrellixAgentInstall.sh
+              /tmp/TrellixAgentInstall.sh
+            
+              echo "User data done"
+            - AGENTBUCKET: !FindInMap [ AgentBuckets, !Ref Environment, AgentBucket ]
+              EIP0: !GetAtt FixedEIP0.AllocationId
+              EIP1: !GetAtt FixedEIP1.AllocationId
+              EIP2: !GetAtt FixedEIP2.AllocationId
+              EIP3: !GetAtt FixedEIP3.AllocationId
+    Metadata:
+      Comment: Configures Squid Proxy
+      AWS::CloudFormation::Init:
+        config:
+          files:
+            "/root/update-dns.sh":
+              content: !Sub | 
+                   # DNS List comma delimited 
+                   dns_list="${CustomDNS}"
+                   #
+                   # check if default 
+                   if [[ $dns_list == "default" ]]; then 
+                     exit
+                   fi
+                   #
+                   # split to list 
+                   array=(${!dns_list//,/ })
+                   int_list=`ls /etc/sysconfig/network-scripts/ifcfg-* | grep -v "\-lo$\|old$"`
+                   
+                   # for all interfaces except lookback 
+                   for int in ${!int_list[@]}
+                   do
+                         # remove spaces 
+                         $int=${!int//[[:blank:]]/}
+                         echo "working on $int"
+                         # make tmp file without DNS settings
+                         grep -ve "PEERDNS=\|DNS.=" $int > ./tmp.int.conf
+                         grep -v "nameserver" /etc/resolv.conf  > ./tmp.resolv.conf
+                         echo "PEERDNS=yes" >> ./tmp.int.conf
+                         counter=1
+                         for i in ${!array[@]}
+                         do
+                            echo "DNS${!counter}=${!i}" >> ./tmp.int.conf
+                            echo "nameserver ${!i}" >> ./tmp.resolv.conf
+                            ((counter++))
+                         done
+                         # update the interface config 
+                         mv $int ${!int}.old
+                         cp ./tmp.int.conf $int
+                   done
+                   # update the resolv.conf 
+                   mv /etc/resolv.conf  /etc/resolv.conf.old
+                   cp ./tmp.resolv.conf /etc/resolv.conf
+                   # clear squid cache if squid is running. Relevant for dns content filtering
+                   # systemctl status squid && systemctl stop squid && rm -rf /var/spool/squid/ && squid -z && systemctl start squid 
+                   echo "done"
+              mode: '000755'
+              owner: "root"
+              group: "root"
+            "/root/fetch-config-cron.sh":
+              content: !Sub | 
+                 # get allowed domain list secret 
+                 aws secretsmanager get-secret-value  --secret-id ${AllowedDomainsSecret} --region ${AWS::Region} > ~/.tmp.hosts
+                 upstreamVersion=$(grep VersionId ~/.tmp.hosts) 
+                 hostVersion=$(cat ~/hostsConfigVersion) || hostVersion="0"
+                 # update if config is mismatch
+                 if [[ $upstreamVersion != $hostVersion ]]; then
+                    mv /etc/squid/squid.allowed.sites.txt /etc/squid/squid.allowed.sites.txt.old
+                    grep SecretString ~/.tmp.hosts | sed  's/^.*SecretString\": \"\(.*\)\"\,/\1/' | tr -d " " | tr "," "\n" > /etc/squid/squid.allowed.sites.txt
+                    grep VersionId ~/.tmp.hosts > ~/hostsConfigVersion
+                    systemctl restart squid
+                    echo "Squid config updated"
+                    logger "Squid allowed domains updated by cron-job from AWS secret store ${AllowedDomainsSecret}"
+                 fi
+              mode: '000755'
+              owner: "root"
+              group: "root"
+            "/etc/squid/squid.conf":
+              content: !Sub |
+                 # Trellix FedRAMP Squid secure configuration
+                 #
+                 # allow internal vpc networks
+                 acl localnet src 10.0.0.0/8
+                 acl localnet src 127.0.0.1
+
+                 # The Instance Metadata Service
+                 # (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html#instance-metadata-limiting-access)
+                 acl imds dst 169.254.169.254
+
+                 # ports allowed to connect
+                 acl SSL_ports port 443
+                 acl Safe_ports port 80
+                 acl Safe_ports port 443
+                 acl Safe_ports port ${ProxyPort}  #squid
+                 
+                 # http method
+                 acl CONNECT method CONNECT
+
+                 # Deny requests to the Instance Metadata Service
+                 http_access deny imds
+
+                 # Deny requests to certain unsafe ports
+                 http_access deny !Safe_ports
+
+                 # Deny CONNECT to other than secure SSL ports
+                 http_access deny CONNECT !SSL_ports
+
+                 # Only allow cachemgr access from localhost
+                 http_access allow localhost manager
+                 http_access deny manager
+
+                 # Deny requests to services running on localhost
+                 http_access deny to_localhost
+
+                 # allow access for to domains on list
+                 #acl allowed_http_sites dstdomain "/etc/squid/squid.allowed.sites.txt"
+                 #http_access allow allowed_http_sites
+                
+                 # TEMP allow all
+                 http_access allow all
+
+                 # And finally deny all other access to this proxy
+                 #http_access deny all
+
+                 # Squid normally listens to port 3128, but needs to be parametrized here
+                 http_port 0.0.0.0:${ProxyPort} ssl-bump cert=/etc/squid/cert.pem
+
+                 # create https acl
+                 acl allowed_https_sites ssl::server_name "/etc/squid/squid.allowed.sites.txt"
+
+                 # SslBump1: After getting TCP-level and HTTP CONNECT info.
+                 acl step1 at_step SslBump1
+
+                 # at step1 splice only allowed domains and deny all
+                 #ssl_bump splice step1 allowed_https_sites
+                 #ssl_bump terminate step1 all
+                
+                 # TEMP allow all
+                 ssl_bump splice step1 all
+
+                 # dont add x-forwarded-for header
+                 forwarded_for delete
+
+                 # custom log format
+                 logformat squidhdrs      %ts.%03tu %6tr %>a "%{User-Agent}>h" %Ss/%03>Hs %<st %rm %ru %[un %Sh/%<a %mt
+                 access_log daemon:/var/log/squid/access.log squidhdrs
+            "/etc/cfn/cfn-hup.conf":
+              content: !Sub |
+                [main]
+                stack= ${AWS::StackId}
+                region=${AWS::Region}
+                interval=5
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/cfn/hooks.d/cfn-auto-reloader.conf":
+              content: !Sub |
+                [cfn-auto-reloader-hook]
+                triggers=post.update
+                path=Resources.OutboundProxyLaunchTemplate.Metadata.AWS::CloudFormation::Init
+                action=/opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource OutboundProxyLaunchTemplate --region ${AWS::Region}
+                runas=root
+              mode: "000400"
+              owner: "root"
+              group: "root"
+            "/etc/rsyslog.d/squid-proxy-siem.conf":
+              content: !Sub |
+                # load modules
+                module(load="imfile")
+
+                # make gtls driver the default
+                $DefaultNetStreamDriver gtls
+                $DefaultNetstreamDriverCAFile /etc/rsyslog.d/siem-ca.crt
+
+                # log file
+                input(type="imfile"
+                      File="/var/log/squid/access.log"
+                      Tag="squid"
+                      Severity="info"
+                      reopenOnTruncate="on"
+                      Facility="local6"
+                    )
+
+                # write to siem
+                if $programname == 'squid' then {
+                  action(
+                        type="omfwd"
+                        Target="${RsyslogTarget}"
+                        Port="6514"
+                        Protocol="tcp"
+                        StreamDriver="gtls"
+                        StreamDriverMode="1"
+                        StreamDriverAuthMode="x509/name"
+                        StreamDriverPermittedPeers="erc.mcafee.local"
+                    )
+                    stop
+                }
+              mode: "000644"
+              owner: "root"
+              group: "root"
+            "/etc/rsyslog.d/siem-ca.crt":
+              content: !FindInMap [Certs, !Ref Environment, CA]
+              mode: "000644"
+              owner: "root"
+              group: "root"              
+    
+
+  NLBTargetALarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Squid proxy NLB target reset count high over 30 for last 15 mins
+      AlarmName: SquidResetCountHigh
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Namespace: AWS/NetworkELB
+      MetricName: TCP_Target_Reset_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !GetAtt LoadBalancer.LoadBalancerFullName
+      EvaluationPeriods: 3
+      Period: 300
+      Threshold: 300
+      Statistic: Sum
+      TreatMissingData: breaching
+      Unit: Count
+
+# Begin automation for instance replacement
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties: 
+      AssumeRolePolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: Role for Lambda function that updates automatically updates the proxy when the pipeline builds
+      ManagedPolicyArns: 
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AWSImageBuilderReadOnlyAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AutoScalingFullAccess
+        - !Sub arn:${AWS::Partition}:iam::aws:policy/AmazonEC2FullAccess
+      RoleName: ProxyUpdaterLambdaRole
+
+
+  ProxyUpdaterLambdaIAMPolicy:
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - iam:GetRole
+          - iam:PassRole
+          Resource: !GetAtt OutboundProxyRole.Arn
+      PolicyName: ProxyUpdaterIAMPolicyPassProxyRole
+      Roles: 
+        - !Ref LambdaRole
+
+  ProxyUpdaterLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties: 
+      Code: 
+          ZipFile: >
+            def lambda_handler(event, context):
+                import json
+                import boto3
+                import os
+                import datetime
+                import base64
+                import gzip
+
+                cw_data = event['awslogs']['data']
+                print(f'data: {cw_data}')
+                compressed_payload = base64.b64decode(cw_data)
+                uncompressed_payload = gzip.decompress(compressed_payload)
+                payload = json.loads(uncompressed_payload)
+                print(f'payload: {payload}' )
+                message = payload['logEvents'][0]['message']
+                print(f'Messsage: {message}')
+
+                #split the message on the first ":", then strip spaces to get the arn from the message.
+                arn=(message.split(':',1)[1]).strip()
+                print(arn)
+
+                # Get the updated AMI build by our pipeline.
+                imagebuilder = boto3.client('imagebuilder')
+                image = imagebuilder.get_image(imageBuildVersionArn=arn)
+                ami=image["image"]["outputResources"]["amis"][0]["image"]
+                print(ami)
+
+                #Get our current launch template  information, we will use this to build a new launch Template Version updated to use our new AMI.
+                asgname=os.environ['AUTOSCALING_GROUP']
+                autoscaling = boto3.client('autoscaling')
+                asg=autoscaling.describe_auto_scaling_groups(AutoScalingGroupNames=[asgname])
+                
+                if asg['ResponseMetadata']['HTTPStatusCode'] != 200:
+                    return {
+                        'statusCode': asg['ResponseMetadata']['HTTPStatusCode'],
+                        'body': 'failed to retrieve existing launch configuration'
+                    }
+                ltid=asg['AutoScalingGroups'][0]['LaunchTemplate']['LaunchTemplateId']
+                ltver=asg['AutoScalingGroups'][0]['LaunchTemplate']['Version']
+                print("Launch Template: ",ltid, " - ", ltver)
+
+                #Create tne new Launch Template Version.
+                dt=datetime.datetime.now()
+                datestamp = dt.strftime('%Y%m%d-%H%M')
+                description='squid-proxy-' + datestamp
+
+                ec2=boto3.client("ec2")
+                response = ec2.create_launch_template_version(
+                    LaunchTemplateId=ltid,
+                    SourceVersion=ltver,
+                    VersionDescription=description,
+                    LaunchTemplateData={
+                        'ImageId':ami
+                    }
+                )
+                newver=response['LaunchTemplateVersion']['VersionNumber']
+
+                #Check that we got a 200 response (created a new launch template version) here.
+                print("Create new version Response: ", response['ResponseMetadata']['HTTPStatusCode'])
+                if response['ResponseMetadata']['HTTPStatusCode'] != 200:
+                    return {
+                    'statusCode': response['ResponseMetadata']['HTTPStatusCode'],
+                    'body': 'failed to create launch configuration'
+                    }
+
+                response=autoscaling.start_instance_refresh(
+                    AutoScalingGroupName=asgname,
+                    Strategy='Rolling',
+                    DesiredConfiguration={
+                        'LaunchTemplate':{
+                            'LaunchTemplateId': ltid,
+                            'Version': str(newver)
+                        }
+                    },
+                    Preferences={
+                        'MinHealthyPercentage': 100,
+                        'CheckpointDelay': 120,
+                        'ScaleInProtectedInstances': 'Refresh',
+                        'StandbyInstances': 'Terminate'
+                    }
+                )    
+                if response['ResponseMetadata']['HTTPStatusCode'] != 200:
+                    return {
+                        'statusCode': response['ResponseMetadata']['HTTPStatusCode'],
+                        'body': 'failed to to initiate instance refresh'
+                    }
+                else:
+                    return {
+                        'statusCode': 200,
+                        'body': "Instance Refresh ID: " + response['InstanceRefreshId']
+                    }
+                
+      Description: Updates the Squid Proxy ASG to use the newly created AMI
+      Environment:
+        Variables:
+          AUTOSCALING_GROUP: !Ref OutboundProxyASG
+      FunctionName: SquidProxyUpdater
+      Handler: "index.lambda_handler"
+      # KmsKeyArn: String  we should add this
+      PackageType: Zip # we need to specify this
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.10
+      # Tags: 
+      #   - Tag
+      Timeout: 60
+  LambdaInvokePermission: 
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref "ProxyUpdaterLambdaFunction"
+      Action: "lambda:InvokeFunction"
+      Principal: !Sub "logs.${AWS::Region}.amazonaws.com"
+      SourceArn: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/imagebuilder/${PipelineLogGroup}:*"
+
+  SubscriptionFilter: 
+    Type: "AWS::Logs::SubscriptionFilter"
+    DependsOn: "LambdaInvokePermission"
+    Properties: 
+      LogGroupName: !Sub "/aws/imagebuilder/${PipelineLogGroup}"
+      FilterPattern: "Image transitioned to AVAILABLE state for Image ARN"
+      DestinationArn: !GetAtt ProxyUpdaterLambdaFunction.Arn
+          
+  ProxyUpdaterLambdaLogsPolicy:
+    Type: AWS::IAM::Policy
+    Properties: 
+      PolicyDocument: 
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: logs:CreateLogGroup
+          Resource: !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:*"
+        - Effect: Allow
+          Action:
+          - logs:CreateLogStream
+          - logs:PutLogEvents
+          Resource:
+            # - arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/LAMBDAFUNCTIONNAME:*
+            - !Sub "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+      PolicyName: ProxyUpdaterLambdaLogsPolicy
+      Roles:
+        - !Ref LambdaRole
+      
+
+Outputs:
+
+  OutboundProxyDomain:
+    Description: Proxy DNS name to be used in the clients 
+    Value: !GetAtt LoadBalancer.DNSName
+    Export: 
+        Name: Proxy-Domain
+
+  OutboundProxyPort:
+    Description: Port of the Proxy 
+    Value: !Ref ProxyPort
+    Export:
+      Name: Proxy-Port
+
+  SecurityGroupProxy:
+    Description: Proxy security group 
+    Value: SecurityGroup_Proxy
+    Export: 
+        Name: Proxy-SecurityGroup
+
+  LinuxProxySettings:
+    Description: Linux proxy settings. Copy and paste to your shell to set the proxy
+    Value: !Sub "export http_proxy=http://${LoadBalancer.DNSName}:${ProxyPort} && export https_proxy=$http_proxy"
+    Export: 
+      Name: LinuxProxySettings
